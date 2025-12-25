@@ -186,13 +186,29 @@ module sirv_dma_top(
   //////////////////////////////////////////////////////////////
   // Ready and Response muxing
   //////////////////////////////////////////////////////////////
+  
+  // Detect invalid address access (neither ITCM nor DTCM)
+  wire sel_invalid = ~sel_itcm & ~sel_dtcm;
+  reg sel_invalid_r;
+  
+  always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      sel_invalid_r <= 1'b0;
+    end else if (mst_icb_cmd_valid && mst_icb_cmd_ready) begin
+      sel_invalid_r <= sel_invalid;
+    end else if (mst_icb_rsp_valid && mst_icb_rsp_ready) begin
+      sel_invalid_r <= 1'b0;  // Clear after response completes
+    end
+  end
+  
   `ifdef E203_HAS_ITCM_EXTITF //{
     `ifdef E203_HAS_DTCM_EXTITF //{
       // Both ITCM and DTCM interfaces available
+      // For invalid addresses, return ready immediately and provide error response
       assign mst_icb_cmd_ready = sel_itcm ? dma2itcm_icb_cmd_ready :
                                  sel_dtcm ? dma2dtcm_icb_cmd_ready : 1'b1;
       assign mst_icb_rsp_valid = sel_itcm_r ? dma2itcm_icb_rsp_valid :
-                                 sel_dtcm_r ? dma2dtcm_icb_rsp_valid : 1'b0;
+                                 sel_dtcm_r ? dma2dtcm_icb_rsp_valid : sel_invalid_r;
       assign mst_icb_rsp_err   = sel_itcm_r ? dma2itcm_icb_rsp_err :
                                  sel_dtcm_r ? dma2dtcm_icb_rsp_err : 1'b1;
       assign mst_icb_rsp_rdata = sel_itcm_r ? dma2itcm_icb_rsp_rdata :
@@ -200,7 +216,7 @@ module sirv_dma_top(
     `else//}{
       // Only ITCM interface available
       assign mst_icb_cmd_ready = sel_itcm ? dma2itcm_icb_cmd_ready : 1'b1;
-      assign mst_icb_rsp_valid = sel_itcm_r ? dma2itcm_icb_rsp_valid : 1'b0;
+      assign mst_icb_rsp_valid = sel_itcm_r ? dma2itcm_icb_rsp_valid : sel_invalid_r;
       assign mst_icb_rsp_err   = sel_itcm_r ? dma2itcm_icb_rsp_err : 1'b1;
       assign mst_icb_rsp_rdata = sel_itcm_r ? dma2itcm_icb_rsp_rdata : 32'h0;
     `endif//}
@@ -208,13 +224,13 @@ module sirv_dma_top(
     `ifdef E203_HAS_DTCM_EXTITF //{
       // Only DTCM interface available
       assign mst_icb_cmd_ready = sel_dtcm ? dma2dtcm_icb_cmd_ready : 1'b1;
-      assign mst_icb_rsp_valid = sel_dtcm_r ? dma2dtcm_icb_rsp_valid : 1'b0;
+      assign mst_icb_rsp_valid = sel_dtcm_r ? dma2dtcm_icb_rsp_valid : sel_invalid_r;
       assign mst_icb_rsp_err   = sel_dtcm_r ? dma2dtcm_icb_rsp_err : 1'b1;
       assign mst_icb_rsp_rdata = sel_dtcm_r ? dma2dtcm_icb_rsp_rdata : 32'h0;
     `else//}{
-      // No external TCM interfaces - return error
+      // No external TCM interfaces - always return error response
       assign mst_icb_cmd_ready = 1'b1;
-      assign mst_icb_rsp_valid = 1'b1;
+      assign mst_icb_rsp_valid = sel_invalid_r;
       assign mst_icb_rsp_err   = 1'b1;
       assign mst_icb_rsp_rdata = 32'h0;
     `endif//}
