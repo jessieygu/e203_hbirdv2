@@ -641,7 +641,7 @@ module tb_conv2d_dma();
 
   // Timeout
   initial begin
-    #50000000  // 50ms timeout
+    #50000000  // 500ms timeout (50M * 10ns = 500ms with 100MHz clock)
     $display("ERROR: Test timeout!");
     $finish;
   end

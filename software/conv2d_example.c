@@ -114,9 +114,9 @@ void conv2d_multichan_sw(void) {
                     }
                 }
                 
-                // Clamp result to 32-bit
+                // Clamp result to unsigned 32-bit range
                 if (sum < 0) sum = 0;
-                if (sum > 0xFFFFFFFF) sum = 0xFFFFFFFF;
+                if (sum > (int64_t)0xFFFFFFFFLL) sum = (int64_t)0xFFFFFFFFLL;
                 
                 output_sw[c][y][x] = (feature_t)sum;
             }
