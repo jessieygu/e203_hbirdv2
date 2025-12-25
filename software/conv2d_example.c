@@ -108,6 +108,9 @@ void conv2d_sw(const uint8_t* src, uint8_t* dst,
 }
 
 // Pack kernel coefficients into register format
+// Note: Signed int8_t values are cast to uint8_t for bit packing.
+// The hardware reads them back as signed values, so the two's complement
+// representation is preserved correctly (e.g., -1 -> 0xFF -> -1).
 uint32_t pack_kernel_0(const int8_t k[3][3]) {
     return ((uint32_t)(uint8_t)k[0][0]) |
            ((uint32_t)(uint8_t)k[0][1] << 8) |
