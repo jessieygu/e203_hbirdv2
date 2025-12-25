@@ -127,8 +127,8 @@ module sirv_dma (
                 default: ;
             endcase
         end else begin
-            // Auto-clear start bit
-            if (state != IDLE) begin
+            // Auto-clear start bit only when transitioning from IDLE to active state
+            if (ctrl_start && state == IDLE && length > 0) begin
                 ctrl_start <= 1'b0;
             end
         end
@@ -217,10 +217,10 @@ module sirv_dma (
                             status_error <= 1'b1;
                             state <= DONE;
                         end else begin
-                            transfer_cnt <= transfer_cnt + 1'b1;
-                            current_src  <= current_src + 4;
-                            current_dst  <= current_dst + 4;
-                            if (transfer_cnt + 1 >= length) begin
+                            transfer_cnt <= transfer_cnt + 32'd1;
+                            current_src  <= current_src + 32'd4;
+                            current_dst  <= current_dst + 32'd4;
+                            if (transfer_cnt + 32'd1 >= length) begin
                                 state <= DONE;
                             end else begin
                                 state <= READ_REQ;

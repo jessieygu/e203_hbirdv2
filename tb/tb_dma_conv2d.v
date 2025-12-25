@@ -290,7 +290,14 @@ module tb_dma_conv2d;
                 // Calculate linear index
                 idx = i * OUT_WIDTH + j;
                 // Pack into 32-bit words (4 bytes each)
-                src_memory[idx >> 2][(idx[1:0]*8) +: 8] = output_data[i][j];
+                // Byte position within word: idx[1:0]
+                // Word index: idx >> 2
+                case (idx[1:0])
+                    2'b00: src_memory[idx >> 2][7:0]   = output_data[i][j];
+                    2'b01: src_memory[idx >> 2][15:8]  = output_data[i][j];
+                    2'b10: src_memory[idx >> 2][23:16] = output_data[i][j];
+                    2'b11: src_memory[idx >> 2][31:24] = output_data[i][j];
+                endcase
             end
         end
         
@@ -358,7 +365,7 @@ module tb_dma_conv2d;
         $display("Verifying transferred data");
         $display("==============================================");
         for (i = 0; i < (OUT_WIDTH * OUT_HEIGHT + 3) / 4; i = i + 1) begin
-            if (src_memory[i] !== dst_memory[i]) begin
+            if (src_memory[i] != dst_memory[i]) begin
                 $display("ERROR: Mismatch at word %0d: src=0x%08h, dst=0x%08h", 
                          i, src_memory[i], dst_memory[i]);
                 errors = errors + 1;

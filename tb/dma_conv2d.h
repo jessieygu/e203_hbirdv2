@@ -82,9 +82,10 @@ extern "C" {
 
 /**
  * @brief Initialize DMA controller
+ * @note Status registers are read-only and self-clearing on new transfer start
  */
 static inline void dma_init(void) {
-    /* Clear any pending status */
+    /* Read status to ensure DMA is in known state */
     (void)DMA_STATUS;
 }
 
