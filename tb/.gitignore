@@ -1,2 +1,4 @@
 tb_top.v.real
 tb_top.v.github
+*.vvp
+*.vcd
