@@ -1,44 +1,48 @@
 /*
- * Simple 2D Convolution Algorithm in C
+ * Multi-Channel 2D Convolution Algorithm in C
  * 
- * This program demonstrates a simple 3x3 2D convolution operation
- * that can be used with the E203 DMA controller and convolution accelerator.
+ * This program demonstrates multi-channel 3x3 2D convolution operation
+ * for the E203 DMA controller and convolution accelerator.
  * 
- * Usage:
- *   1. Configure the convolution accelerator registers
- *   2. Start the convolution operation
- *   3. Results are stored via DMA to destination address
- * 
+ * Parameters:
+ *   - Feature map: 16×16×3 (width×height×channels)
+ *   - Kernel: 3×3×3 (width×height×channels)
+ *   - Padding: Invalid (no padding)
+ *   - Stride: 1
+ *   - Data width: 32-bit per element
+ *   - Output: 14×14×3 (width×height×channels)
+ *
  * Register Map:
  *   CONV_BASE + 0x00: Control (enable, start, done, busy, irq_en)
- *   CONV_BASE + 0x04: Source address
- *   CONV_BASE + 0x08: Destination address  
- *   CONV_BASE + 0x0C: Image width
- *   CONV_BASE + 0x10: Image height
- *   CONV_BASE + 0x14: Kernel coefficients [0][0], [0][1], [0][2], [1][0]
- *   CONV_BASE + 0x18: Kernel coefficients [1][1], [1][2], [2][0], [2][1]
- *   CONV_BASE + 0x1C: Kernel coefficient [2][2]
- *   CONV_BASE + 0x20: Status (current x, y position)
+ *   CONV_BASE + 0x04: Source feature map address
+ *   CONV_BASE + 0x08: Destination result address  
+ *   CONV_BASE + 0x0C: Image width (16)
+ *   CONV_BASE + 0x10: Image height (16)
+ *   CONV_BASE + 0x14: Number of channels (3)
+ *   CONV_BASE + 0x18: Kernel base address
+ *   CONV_BASE + 0x1C: Status (current position)
  */
 
 #include <stdint.h>
+#include <string.h>
 
 // Base addresses (example, adjust for your memory map)
 #define CONV_BASE       0x10043000
 #define DMA_BASE        0x10042000
-#define IMAGE_SRC_ADDR  0x90000000  // DTCM
-#define IMAGE_DST_ADDR  0x90001000  // DTCM
+#define IMAGE_SRC_ADDR  0x90000000  // DTCM - Feature map
+#define IMAGE_DST_ADDR  0x90002000  // DTCM - Output
+#define KERNEL_ADDR     0x90001000  // DTCM - Kernel
+#define DMA_DST_ADDR    0x90003000  // DTCM - DMA destination
 
-// Convolution registers
+// Multi-channel Convolution registers
 #define CONV_CTRL       (*(volatile uint32_t*)(CONV_BASE + 0x00))
 #define CONV_SRC_ADDR   (*(volatile uint32_t*)(CONV_BASE + 0x04))
 #define CONV_DST_ADDR   (*(volatile uint32_t*)(CONV_BASE + 0x08))
 #define CONV_IMG_WIDTH  (*(volatile uint32_t*)(CONV_BASE + 0x0C))
 #define CONV_IMG_HEIGHT (*(volatile uint32_t*)(CONV_BASE + 0x10))
-#define CONV_KERNEL_0   (*(volatile uint32_t*)(CONV_BASE + 0x14))
-#define CONV_KERNEL_1   (*(volatile uint32_t*)(CONV_BASE + 0x18))
-#define CONV_KERNEL_2   (*(volatile uint32_t*)(CONV_BASE + 0x1C))
-#define CONV_STATUS     (*(volatile uint32_t*)(CONV_BASE + 0x20))
+#define CONV_CHANNELS   (*(volatile uint32_t*)(CONV_BASE + 0x14))
+#define CONV_KERNEL     (*(volatile uint32_t*)(CONV_BASE + 0x18))
+#define CONV_STATUS     (*(volatile uint32_t*)(CONV_BASE + 0x1C))
 
 // DMA registers
 #define DMA_CTRL        (*(volatile uint32_t*)(DMA_BASE + 0x00))
@@ -54,102 +58,106 @@
 #define CTRL_BUSY       (1 << 3)
 #define CTRL_IRQ_EN     (1 << 4)
 
-// Image dimensions for test
-#define IMG_WIDTH   8
-#define IMG_HEIGHT  8
-#define OUT_WIDTH   (IMG_WIDTH - 2)
-#define OUT_HEIGHT  (IMG_HEIGHT - 2)
+// Parameters matching hardware specification
+#define INPUT_WIDTH     16
+#define INPUT_HEIGHT    16
+#define NUM_CHANNELS    3
+#define KERNEL_SIZE     3
+#define OUTPUT_WIDTH    (INPUT_WIDTH - KERNEL_SIZE + 1)   // 14
+#define OUTPUT_HEIGHT   (INPUT_HEIGHT - KERNEL_SIZE + 1)  // 14
 
-// Test image data (8x8 grayscale)
-static const uint8_t test_image[IMG_HEIGHT][IMG_WIDTH] = {
-    {  0,  10,  20,  30,  40,  50,  60,  70},
-    { 10,  20,  30,  40,  50,  60,  70,  80},
-    { 20,  30,  40,  50,  60,  70,  80,  90},
-    { 30,  40,  50,  60,  70,  80,  90, 100},
-    { 40,  50,  60,  70,  80,  90, 100, 110},
-    { 50,  60,  70,  80,  90, 100, 110, 120},
-    { 60,  70,  80,  90, 100, 110, 120, 130},
-    { 70,  80,  90, 100, 110, 120, 130, 140}
-};
+// Feature map data type (32-bit per element)
+typedef int32_t feature_t;
 
-// 3x3 Edge detection kernel (Sobel-like horizontal)
-static const int8_t kernel[3][3] = {
-    {-1,  0,  1},
-    {-2,  0,  2},
-    {-1,  0,  1}
-};
+// Test feature map data (16x16x3)
+static feature_t feature_map[NUM_CHANNELS][INPUT_HEIGHT][INPUT_WIDTH];
 
-// Software reference convolution
-void conv2d_sw(const uint8_t* src, uint8_t* dst, 
-               int img_width, int img_height,
-               const int8_t kernel[3][3]) {
-    int out_width = img_width - 2;
-    int out_height = img_height - 2;
-    
-    for (int y = 0; y < out_height; y++) {
-        for (int x = 0; x < out_width; x++) {
-            int32_t sum = 0;
-            
-            // 3x3 convolution
-            for (int ky = 0; ky < 3; ky++) {
-                for (int kx = 0; kx < 3; kx++) {
-                    int src_idx = (y + ky) * img_width + (x + kx);
-                    sum += (int32_t)src[src_idx] * kernel[ky][kx];
-                }
+// 3x3 kernels for each channel (32-bit coefficients)
+static int32_t kernels[NUM_CHANNELS][KERNEL_SIZE][KERNEL_SIZE];
+
+// Output data (14x14x3)
+static feature_t output_sw[NUM_CHANNELS][OUTPUT_HEIGHT][OUTPUT_WIDTH];
+static feature_t output_hw[NUM_CHANNELS][OUTPUT_HEIGHT][OUTPUT_WIDTH];
+
+// Initialize test data
+void init_test_data(void) {
+    // Initialize feature map: channel*1000 + row*16 + col
+    for (int c = 0; c < NUM_CHANNELS; c++) {
+        for (int y = 0; y < INPUT_HEIGHT; y++) {
+            for (int x = 0; x < INPUT_WIDTH; x++) {
+                feature_map[c][y][x] = c * 1000 + y * 16 + x;
             }
-            
-            // Clamp result to 0-255
-            if (sum < 0) sum = 0;
-            if (sum > 255) sum = 255;
-            
-            dst[y * out_width + x] = (uint8_t)sum;
+        }
+    }
+    
+    // Initialize kernels: identity kernel (center = 1, others = 0)
+    for (int c = 0; c < NUM_CHANNELS; c++) {
+        for (int ky = 0; ky < KERNEL_SIZE; ky++) {
+            for (int kx = 0; kx < KERNEL_SIZE; kx++) {
+                kernels[c][ky][kx] = (ky == 1 && kx == 1) ? 1 : 0;
+            }
         }
     }
 }
 
-// Pack kernel coefficients into register format
-// Note: Signed int8_t values are cast to uint8_t for bit packing.
-// The hardware reads them back as signed values, so the two's complement
-// representation is preserved correctly (e.g., -1 -> 0xFF -> -1).
-uint32_t pack_kernel_0(const int8_t k[3][3]) {
-    return ((uint32_t)(uint8_t)k[0][0]) |
-           ((uint32_t)(uint8_t)k[0][1] << 8) |
-           ((uint32_t)(uint8_t)k[0][2] << 16) |
-           ((uint32_t)(uint8_t)k[1][0] << 24);
+// Software reference convolution for multi-channel
+void conv2d_multichan_sw(void) {
+    for (int c = 0; c < NUM_CHANNELS; c++) {
+        for (int y = 0; y < OUTPUT_HEIGHT; y++) {
+            for (int x = 0; x < OUTPUT_WIDTH; x++) {
+                int64_t sum = 0;
+                
+                // 3x3 convolution
+                for (int ky = 0; ky < KERNEL_SIZE; ky++) {
+                    for (int kx = 0; kx < KERNEL_SIZE; kx++) {
+                        sum += (int64_t)feature_map[c][y + ky][x + kx] * kernels[c][ky][kx];
+                    }
+                }
+                
+                // Clamp result to 32-bit
+                if (sum < 0) sum = 0;
+                if (sum > 0xFFFFFFFF) sum = 0xFFFFFFFF;
+                
+                output_sw[c][y][x] = (feature_t)sum;
+            }
+        }
+    }
 }
 
-uint32_t pack_kernel_1(const int8_t k[3][3]) {
-    return ((uint32_t)(uint8_t)k[1][1]) |
-           ((uint32_t)(uint8_t)k[1][2] << 8) |
-           ((uint32_t)(uint8_t)k[2][0] << 16) |
-           ((uint32_t)(uint8_t)k[2][1] << 24);
-}
-
-uint32_t pack_kernel_2(const int8_t k[3][3]) {
-    return (uint32_t)(uint8_t)k[2][2];
-}
-
-// Initialize convolution accelerator
-void conv2d_hw_init(uint32_t src_addr, uint32_t dst_addr,
-                    int img_width, int img_height,
-                    const int8_t kernel[3][3]) {
-    // Set source and destination addresses
-    CONV_SRC_ADDR = src_addr;
-    CONV_DST_ADDR = dst_addr;
+// Initialize hardware convolution accelerator
+void conv2d_hw_init(void) {
+    // Copy feature map to hardware memory
+    feature_t* hw_feature = (feature_t*)IMAGE_SRC_ADDR;
+    for (int c = 0; c < NUM_CHANNELS; c++) {
+        for (int y = 0; y < INPUT_HEIGHT; y++) {
+            for (int x = 0; x < INPUT_WIDTH; x++) {
+                hw_feature[c * INPUT_HEIGHT * INPUT_WIDTH + y * INPUT_WIDTH + x] = 
+                    feature_map[c][y][x];
+            }
+        }
+    }
     
-    // Set image dimensions
-    CONV_IMG_WIDTH = img_width;
-    CONV_IMG_HEIGHT = img_height;
+    // Copy kernels to hardware memory
+    int32_t* hw_kernel = (int32_t*)KERNEL_ADDR;
+    for (int c = 0; c < NUM_CHANNELS; c++) {
+        for (int ky = 0; ky < KERNEL_SIZE; ky++) {
+            for (int kx = 0; kx < KERNEL_SIZE; kx++) {
+                hw_kernel[c * 9 + ky * 3 + kx] = kernels[c][ky][kx];
+            }
+        }
+    }
     
-    // Set kernel coefficients
-    CONV_KERNEL_0 = pack_kernel_0(kernel);
-    CONV_KERNEL_1 = pack_kernel_1(kernel);
-    CONV_KERNEL_2 = pack_kernel_2(kernel);
+    // Configure convolution accelerator
+    CONV_SRC_ADDR = IMAGE_SRC_ADDR;
+    CONV_DST_ADDR = IMAGE_DST_ADDR;
+    CONV_IMG_WIDTH = INPUT_WIDTH;
+    CONV_IMG_HEIGHT = INPUT_HEIGHT;
+    CONV_CHANNELS = NUM_CHANNELS;
+    CONV_KERNEL = KERNEL_ADDR;
 }
 
 // Start convolution hardware
 void conv2d_hw_start(void) {
-    // Enable and start
     CONV_CTRL = CTRL_ENABLE | CTRL_START;
 }
 
@@ -158,8 +166,20 @@ void conv2d_hw_wait(void) {
     while (!(CONV_CTRL & CTRL_DONE)) {
         // Wait
     }
-    // Clear done flag
-    CONV_CTRL = CTRL_DONE | CTRL_ENABLE;
+    CONV_CTRL = CTRL_DONE | CTRL_ENABLE;  // Clear done flag
+}
+
+// Read hardware results
+void conv2d_hw_read_results(void) {
+    feature_t* hw_output = (feature_t*)IMAGE_DST_ADDR;
+    for (int c = 0; c < NUM_CHANNELS; c++) {
+        for (int y = 0; y < OUTPUT_HEIGHT; y++) {
+            for (int x = 0; x < OUTPUT_WIDTH; x++) {
+                output_hw[c][y][x] = 
+                    hw_output[c * OUTPUT_HEIGHT * OUTPUT_WIDTH + y * OUTPUT_WIDTH + x];
+            }
+        }
+    }
 }
 
 // Use DMA to copy data
@@ -169,73 +189,86 @@ void dma_copy(uint32_t src, uint32_t dst, uint32_t len) {
     DMA_XFER_LEN = len;
     DMA_CTRL = CTRL_ENABLE | CTRL_START;
     
-    // Wait for DMA completion
     while (!(DMA_CTRL & CTRL_DONE)) {
         // Wait
     }
-    // Clear done flag
-    DMA_CTRL = CTRL_DONE;
+    DMA_CTRL = CTRL_DONE;  // Clear done flag
 }
 
-// Main function demonstrating usage
-int main(void) {
-    uint8_t output_sw[OUT_HEIGHT * OUT_WIDTH];
-    uint8_t* src_mem = (uint8_t*)IMAGE_SRC_ADDR;
-    uint8_t* dst_mem = (uint8_t*)IMAGE_DST_ADDR;
-    
-    // Copy test image to source memory using DMA
-    // (In real hardware, you would use DMA to copy from external memory)
-    for (int i = 0; i < IMG_HEIGHT * IMG_WIDTH; i++) {
-        src_mem[i] = ((uint8_t*)test_image)[i];
-    }
-    
-    // Method 1: Software convolution (reference)
-    conv2d_sw((uint8_t*)test_image, output_sw, IMG_WIDTH, IMG_HEIGHT, kernel);
-    
-    // Method 2: Hardware convolution with DMA output
-    conv2d_hw_init(IMAGE_SRC_ADDR, IMAGE_DST_ADDR, IMG_WIDTH, IMG_HEIGHT, kernel);
-    conv2d_hw_start();
-    conv2d_hw_wait();
-    
-    // Optionally use DMA to copy results to another location
-    // dma_copy(IMAGE_DST_ADDR, RESULT_ADDR, OUT_WIDTH * OUT_HEIGHT);
-    
-    // Verify results
+// Verify results
+int verify_results(void) {
     int errors = 0;
-    for (int i = 0; i < OUT_WIDTH * OUT_HEIGHT; i++) {
-        if (dst_mem[i] != output_sw[i]) {
-            errors++;
+    for (int c = 0; c < NUM_CHANNELS; c++) {
+        for (int y = 0; y < OUTPUT_HEIGHT; y++) {
+            for (int x = 0; x < OUTPUT_WIDTH; x++) {
+                if (output_hw[c][y][x] != output_sw[c][y][x]) {
+                    errors++;
+                }
+            }
         }
     }
+    return errors;
+}
+
+// Main function demonstrating multi-channel convolution with DMA
+int main(void) {
+    // Initialize test data
+    init_test_data();
+    
+    // Run software reference
+    conv2d_multichan_sw();
+    
+    // Run hardware convolution
+    conv2d_hw_init();
+    conv2d_hw_start();
+    conv2d_hw_wait();
+    conv2d_hw_read_results();
+    
+    // Verify results
+    int errors = verify_results();
+    
+    // Use DMA to copy results to another location
+    dma_copy(IMAGE_DST_ADDR, DMA_DST_ADDR, 
+             NUM_CHANNELS * OUTPUT_HEIGHT * OUTPUT_WIDTH * sizeof(feature_t));
     
     return errors;
 }
 
 /*
- * Example kernel configurations:
- * 
- * 1. Identity kernel (no change):
+ * Hardware Parameters:
+ *   - Input:  16×16×3 (768 elements × 4 bytes = 3072 bytes)
+ *   - Kernel: 3×3×3 (27 elements × 4 bytes = 108 bytes)
+ *   - Output: 14×14×3 (588 elements × 4 bytes = 2352 bytes)
+ *   - Total memory required: ~5.5 KB
+ *
+ * Computation:
+ *   - Per output pixel: 9 MACs
+ *   - Total MACs: 14×14×3×9 = 5292 MACs
+ *
+ * Example kernels (3x3):
+ *
+ * 1. Identity kernel:
  *    { 0, 0, 0 }
  *    { 0, 1, 0 }
  *    { 0, 0, 0 }
- * 
- * 2. Edge detection (horizontal):
+ *
+ * 2. Edge detection (Sobel horizontal):
  *    { -1,  0,  1 }
  *    { -2,  0,  2 }
  *    { -1,  0,  1 }
- * 
- * 3. Edge detection (vertical):
+ *
+ * 3. Edge detection (Sobel vertical):
  *    { -1, -2, -1 }
  *    {  0,  0,  0 }
  *    {  1,  2,  1 }
- * 
+ *
  * 4. Sharpen:
  *    {  0, -1,  0 }
  *    { -1,  5, -1 }
  *    {  0, -1,  0 }
- * 
- * 5. Box blur (average):
+ *
+ * 5. Box blur (average, divide by 9):
  *    { 1, 1, 1 }
- *    { 1, 1, 1 }   (divide result by 9)
+ *    { 1, 1, 1 }
  *    { 1, 1, 1 }
  */
